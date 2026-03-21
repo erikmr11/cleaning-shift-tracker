@@ -4,6 +4,7 @@ from datetime import datetime, timezone, timedelta
 import os
 from dotenv import load_dotenv
 import pytz
+import pandas as pd
 
 # Toronto timezone
 toronto_tz = pytz.timezone("America/Toronto")
@@ -18,6 +19,7 @@ st.set_page_config(page_title="Cleaning Shift Tracker", layout="centered")
 
 st.title("🧹 Cleaning Shift Tracker")
 
+# Initialize session state
 if "worker" not in st.session_state:
     st.session_state.worker = None
     st.session_state.worker_id = None
@@ -45,92 +47,125 @@ if st.session_state.worker is None:
 else:
     st.success(f"Welcome, {st.session_state.worker}!")
 
-    buildings = ["Joy Condos Markham", "Bauhaus Downtown"]
-    building = st.selectbox("Which building are you working at?", buildings)
+    # Get worker role and rate
+    worker_data = supabase.table("workers").select("hourly_rate, role").eq("id", st.session_state.worker_id).execute().data
+    rate = worker_data[0]["hourly_rate"] if worker_data else 18.00
+    role = worker_data[0]["role"] if worker_data else "worker"
 
-    if not st.session_state.is_clocked_in:
-        st.subheader("Start Shift")
-        photo = st.camera_input("Take arrival photo (required)")
-        notes = st.text_area("Notes (optional)")
-        
-        if st.button("START SHIFT", type="primary"):
-            if photo is None:
-                st.error("Photo is required!")
-            else:
-                filename = f"arrival/{st.session_state.worker}/{datetime.now().isoformat()}.jpg"
-                supabase.storage.from_("photos").upload(filename, photo.getvalue())
-                photo_url = supabase.storage.from_("photos").get_public_url(filename)
-                
-                data = {
-                    "worker_id": st.session_state.worker_id,
-                    "worker_name": st.session_state.worker,
-                    "building": building,
-                    "arrival_photo_url": photo_url,
-                    "notes": notes
-                }
-                response = supabase.table("shifts").insert(data).execute()
-                st.session_state.shift_id = response.data[0]["id"]
-                st.session_state.is_clocked_in = True
-                
-                now_local = datetime.now(toronto_tz)
-                st.success(f"Shift started at {now_local.strftime('%Y-%m-%d %H:%M %Z')} at {building}")
-                st.rerun()
-    else:
-        st.subheader(f"You are CLOCKED IN at {building}")
-        photo = st.camera_input("Take end-of-day photo (optional)")
-        notes = st.text_area("Notes")
-        
-        if st.button("END SHIFT", type="secondary"):
-            photo_url = None
-            if photo:
-                filename = f"end/{st.session_state.worker}/{datetime.now().isoformat()}.jpg"
-                supabase.storage.from_("photos").upload(filename, photo.getvalue())
-                photo_url = supabase.storage.from_("photos").get_public_url(filename)
-            
-            shift = supabase.table("shifts").select("start_time").eq("id", st.session_state.shift_id).execute().data[0]
-            start_str = shift["start_time"]
-            
-            start_utc = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
-            now_utc = datetime.now(timezone.utc)
-            
-            hours = round((now_utc - start_utc).total_seconds() / 3600, 2)
-            
-            supabase.table("shifts").update({
-                "end_time": now_utc.isoformat(),
-                "total_hours": hours,
-                "end_photo_url": photo_url,
-                "notes": notes
-            }).eq("id", st.session_state.shift_id).execute()
-            
-            now_local = datetime.now(toronto_tz)
-            st.success(f"Shift ended at {now_local.strftime('%Y-%m-%d %H:%M %Z')} at {building} — {hours} hours recorded!")
-            st.session_state.is_clocked_in = False
-            st.session_state.shift_id = None
-            st.rerun()
-    
-    # Weekly Summary (hours + pay)
-    st.subheader("My Weekly Summary")
+    # Weekly Summary - role-based
+    st.subheader("My Summary")
 
-    # Get shifts from last 7 days
-    one_week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
-    weekly_shifts = supabase.table("shifts") \
-        .select("start_time, end_time, total_hours") \
-        .eq("worker_id", st.session_state.worker_id) \
-        .gte("start_time", one_week_ago) \
-        .execute().data
+    if role == "worker":
+        # Regular worker: show hours + rate + pay
+        one_week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+        weekly_shifts = supabase.table("shifts") \
+            .select("total_hours") \
+            .eq("worker_id", st.session_state.worker_id) \
+            .gte("start_time", one_week_ago) \
+            .execute().data
 
-    if weekly_shifts:
         total_hours = sum(shift["total_hours"] or 0 for shift in weekly_shifts)
-        # Get hourly rate from workers table
-        worker_data = supabase.table("workers").select("hourly_rate").eq("id", st.session_state.worker_id).execute().data
-        rate = worker_data[0]["hourly_rate"] if worker_data else 18.00
         total_pay = total_hours * rate
-        
+
         st.write(f"**Total hours this week:** {total_hours:.2f}")
         st.write(f"**Hourly rate:** ${rate:.2f}/h")
         st.write(f"**Estimated pay:** ${total_pay:.2f}")
     else:
-        st.info("No shifts this week yet.")
+        # Accountant / salaried: show salary message
+        st.info("You are on salary. Contact payroll for details.")
+
+    # Accountant-only: Full payroll details + CSV export
+    if role == "accountant":
+        st.subheader("Full Payroll Details (All Workers)")
+
+        fifteen_days_ago = (datetime.now(timezone.utc) - timedelta(days=15)).isoformat()
+        all_shifts = supabase.table("shifts") \
+            .select("worker_name, start_time, end_time, total_hours, building") \
+            .gte("start_time", fifteen_days_ago) \
+            .execute().data
+
+        if all_shifts:
+            df = pd.DataFrame(all_shifts)
+            df['start_time'] = pd.to_datetime(df['start_time']).dt.tz_convert('America/Toronto')
+            df['end_time'] = pd.to_datetime(df['end_time']).dt.tz_convert('America/Toronto')
+            df['pay'] = df['total_hours'] * 18.00  # Default; can join with rate later
+
+            st.dataframe(df)
+
+            csv = df.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="Download Full Payroll CSV (last 15 days)",
+                data=csv,
+                file_name="payroll_15days_all_workers.csv",
+                mime="text/csv"
+            )
+        else:
+            st.info("No shifts in the last 15 days.")
+
+    # Clock in/out - only for regular workers
+    if role == "worker":
+        buildings = ["Joy Condos Markham", "Bauhaus Downtown"]
+        building = st.selectbox("Which building are you working at?", buildings)
+
+        if not st.session_state.is_clocked_in:
+            st.subheader("Start Shift")
+            photo = st.camera_input("Take arrival photo (required)")
+            notes = st.text_area("Notes (optional)")
+            
+            if st.button("START SHIFT", type="primary"):
+                if photo is None:
+                    st.error("Photo is required!")
+                else:
+                    filename = f"arrival/{st.session_state.worker}/{datetime.now().isoformat()}.jpg"
+                    supabase.storage.from_("photos").upload(filename, photo.getvalue())
+                    photo_url = supabase.storage.from_("photos").get_public_url(filename)
+                    
+                    data = {
+                        "worker_id": st.session_state.worker_id,
+                        "worker_name": st.session_state.worker,
+                        "building": building,
+                        "arrival_photo_url": photo_url,
+                        "notes": notes
+                    }
+                    response = supabase.table("shifts").insert(data).execute()
+                    st.session_state.shift_id = response.data[0]["id"]
+                    st.session_state.is_clocked_in = True
+                    
+                    now_local = datetime.now(toronto_tz)
+                    st.success(f"Shift started at {now_local.strftime('%Y-%m-%d %H:%M %Z')} at {building}")
+                    st.rerun()
+        else:
+            st.subheader(f"You are CLOCKED IN at {building}")
+            photo = st.camera_input("Take end-of-day photo (optional)")
+            notes = st.text_area("Notes")
+            
+            if st.button("END SHIFT", type="secondary"):
+                photo_url = None
+                if photo:
+                    filename = f"end/{st.session_state.worker}/{datetime.now().isoformat()}.jpg"
+                    supabase.storage.from_("photos").upload(filename, photo.getvalue())
+                    photo_url = supabase.storage.from_("photos").get_public_url(filename)
+                
+                shift = supabase.table("shifts").select("start_time").eq("id", st.session_state.shift_id).execute().data[0]
+                start_str = shift["start_time"]
+                
+                start_utc = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
+                now_utc = datetime.now(timezone.utc)
+                
+                hours = round((now_utc - start_utc).total_seconds() / 3600, 2)
+                
+                supabase.table("shifts").update({
+                    "end_time": now_utc.isoformat(),
+                    "total_hours": hours,
+                    "end_photo_url": photo_url,
+                    "notes": notes
+                }).eq("id", st.session_state.shift_id).execute()
+                
+                now_local = datetime.now(toronto_tz)
+                st.success(f"Shift ended at {now_local.strftime('%Y-%m-%d %H:%M %Z')} at {building} — {hours} hours recorded!")
+                st.session_state.is_clocked_in = False
+                st.session_state.shift_id = None
+                st.rerun()
     
     if st.button("Logout"):
         st.session_state.worker = None
