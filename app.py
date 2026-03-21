@@ -47,37 +47,13 @@ if st.session_state.worker is None:
 else:
     st.success(f"Welcome, {st.session_state.worker}!")
 
-    # Get worker role and rate
-    worker_data = supabase.table("workers").select("hourly_rate, role").eq("id", st.session_state.worker_id).execute().data
-    rate = worker_data[0]["hourly_rate"] if worker_data else 18.00
+    # Get worker role
+    worker_data = supabase.table("workers").select("role").eq("id", st.session_state.worker_id).execute().data
     role = worker_data[0]["role"] if worker_data else "worker"
 
-    # Weekly Summary - role-based
-    st.subheader("My Summary")
-
-    if role == "worker":
-        # Regular worker: show hours + rate + pay
-        one_week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
-        weekly_shifts = supabase.table("shifts") \
-            .select("total_hours") \
-            .eq("worker_id", st.session_state.worker_id) \
-            .gte("start_time", one_week_ago) \
-            .execute().data
-
-        total_hours = sum(shift["total_hours"] or 0 for shift in weekly_shifts)
-        total_pay = total_hours * rate
-
-        st.write(f"**Total hours this week:** {total_hours:.2f}")
-        st.write(f"**Hourly rate:** ${rate:.2f}/h")
-        st.write(f"**Estimated pay:** ${total_pay:.2f}")
-    else:
-        # Accountant / salaried: show salary message
-        st.info("You are on salary. Contact payroll for details.")
-
-    # Accountant-only: Full payroll details + CSV export
-    if role == "accountant":
-        st.subheader("Full Payroll Details (All Workers)")
-
+    # Manager / Accountant Dashboard (payroll + CSV)
+    if role in ["manager", "accountant"]:
+        st.subheader("Payroll Overview (last 15 days)")
         fifteen_days_ago = (datetime.now(timezone.utc) - timedelta(days=15)).isoformat()
         all_shifts = supabase.table("shifts") \
             .select("worker_name, start_time, end_time, total_hours, building") \
@@ -88,7 +64,7 @@ else:
             df = pd.DataFrame(all_shifts)
             df['start_time'] = pd.to_datetime(df['start_time']).dt.tz_convert('America/Toronto')
             df['end_time'] = pd.to_datetime(df['end_time']).dt.tz_convert('America/Toronto')
-            df['pay'] = df['total_hours'] * 18.00  # Default; can join with rate later
+            df['pay'] = df['total_hours'] * 18.00  # Default rate; can join with workers table later
 
             st.dataframe(df)
 
@@ -102,7 +78,7 @@ else:
         else:
             st.info("No shifts in the last 15 days.")
 
-    # Clock in/out - only for regular workers
+    # Clock in/out - only for regular workers (role == "worker")
     if role == "worker":
         buildings = ["Joy Condos Markham", "Bauhaus Downtown"]
         building = st.selectbox("Which building are you working at?", buildings)
