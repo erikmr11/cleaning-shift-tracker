@@ -1,6 +1,6 @@
 import streamlit as st
 from supabase import create_client, Client
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import os
 from dotenv import load_dotenv
 import pytz
@@ -44,11 +44,10 @@ if st.session_state.worker is None:
             st.error("Worker not found")
 else:
     st.success(f"Welcome, {st.session_state.worker}!")
-    
-    # ===  Building dropdown ===
-    buildings = ["Joy Condos Markham", "Bauhaus Downtown"]  # Add more here later if needed
+
+    buildings = ["Joy Condos Markham", "Bauhaus Downtown"]
     building = st.selectbox("Which building are you working at?", buildings)
-    
+
     if not st.session_state.is_clocked_in:
         st.subheader("Start Shift")
         photo = st.camera_input("Take arrival photo (required)")
@@ -65,7 +64,7 @@ else:
                 data = {
                     "worker_id": st.session_state.worker_id,
                     "worker_name": st.session_state.worker,
-                    "building": building,  # Now saves the selected building
+                    "building": building,
                     "arrival_photo_url": photo_url,
                     "notes": notes
                 }
@@ -74,7 +73,7 @@ else:
                 st.session_state.is_clocked_in = True
                 
                 now_local = datetime.now(toronto_tz)
-                st.success(f"Shift started at {now_local.strftime('%H:%M %Z')} at {building}")
+                st.success(f"Shift started at {now_local.strftime('%Y-%m-%d %H:%M %Z')} at {building}")
                 st.rerun()
     else:
         st.subheader(f"You are CLOCKED IN at {building}")
@@ -104,10 +103,38 @@ else:
             }).eq("id", st.session_state.shift_id).execute()
             
             now_local = datetime.now(toronto_tz)
-            st.success(f"Shift ended at {now_local.strftime('%H:%M %Z')} at {building} — {hours} hours recorded!")
+            st.success(f"Shift ended at {now_local.strftime('%Y-%m-%d %H:%M %Z')} at {building} — {hours} hours recorded!")
             st.session_state.is_clocked_in = False
+            st.session_state.shift_id = None
             st.rerun()
+    
+    # Weekly Summary (hours + pay)
+    st.subheader("My Weekly Summary")
+
+    # Get shifts from last 7 days
+    one_week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+    weekly_shifts = supabase.table("shifts") \
+        .select("start_time, end_time, total_hours") \
+        .eq("worker_id", st.session_state.worker_id) \
+        .gte("start_time", one_week_ago) \
+        .execute().data
+
+    if weekly_shifts:
+        total_hours = sum(shift["total_hours"] or 0 for shift in weekly_shifts)
+        # Get hourly rate from workers table
+        worker_data = supabase.table("workers").select("hourly_rate").eq("id", st.session_state.worker_id).execute().data
+        rate = worker_data[0]["hourly_rate"] if worker_data else 18.00
+        total_pay = total_hours * rate
+        
+        st.write(f"**Total hours this week:** {total_hours:.2f}")
+        st.write(f"**Hourly rate:** ${rate:.2f}/h")
+        st.write(f"**Estimated pay:** ${total_pay:.2f}")
+    else:
+        st.info("No shifts this week yet.")
     
     if st.button("Logout"):
         st.session_state.worker = None
+        st.session_state.worker_id = None
+        st.session_state.is_clocked_in = False
+        st.session_state.shift_id = None
         st.rerun()
